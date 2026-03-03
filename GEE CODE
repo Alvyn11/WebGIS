@@ -1,0 +1,172 @@
+// =======================================================
+// LULC CLASSIFICATION (2025 ONLY)
+// Quezon, Bukidnon – Barangay Level
+// =======================================================
+
+// ---------------- CENTER MAP ----------------
+Map.centerObject(Quezon, 11);
+Map.addLayer(Quezon, {color: 'red'}, 'Quezon Boundary');
+Map.addLayer(table, {color: 'blue'}, 'Poblacion');
+Map.addLayer(table2, {color: 'green'}, 'Minsalirac');
+Map.addLayer(table3, {color: 'orange'}, 'San Isidro');
+
+// =======================================================
+// 1️⃣ TRAINING USING 2025 DATA
+// =======================================================
+
+var trainStart = '2025-01-01';
+var trainEnd   = '2025-12-31';
+
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(Quezon)
+  .filterDate(trainStart, trainEnd);
+
+var clouds = ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY')
+  .filterBounds(Quezon)
+  .filterDate(trainStart, trainEnd);
+
+var joined = ee.Join.saveFirst('cloud_mask').apply({
+  primary: s2,
+  secondary: clouds,
+  condition: ee.Filter.equals({
+    leftField: 'system:index',
+    rightField: 'system:index'
+  })
+});
+
+function maskClouds(img) {
+  var cloudProb = ee.Image(img.get('cloud_mask')).select('probability');
+  return img.updateMask(cloudProb.lt(10));
+}
+
+var composite = ee.ImageCollection(joined)
+  .map(maskClouds)
+  .median()
+  .clip(Quezon);
+
+// ---------------- BANDS ----------------
+var bands = ['B2','B3','B4','B8','B11','B12'];
+var s2Bands = composite.select(bands);
+
+// ---------------- INDICES ----------------
+var NDVI = s2Bands.normalizedDifference(['B8','B4']).rename('NDVI');
+var GNDVI = s2Bands.normalizedDifference(['B8','B3']).rename('GNDVI');
+var NDWI = s2Bands.normalizedDifference(['B3','B8']).rename('NDWI');
+var MNDWI = s2Bands.normalizedDifference(['B3','B11']).rename('MNDWI');
+
+var EVI = s2Bands.expression(
+  '2.5*((NIR-RED)/(NIR + 6*RED - 7.5*BLUE + 1))', {
+    NIR: s2Bands.select('B8').divide(10000),
+    RED: s2Bands.select('B4').divide(10000),
+    BLUE: s2Bands.select('B2').divide(10000)
+}).rename('EVI');
+
+var SAVI = s2Bands.expression(
+  '((NIR-RED)/(NIR+RED+0.5))*(1.5)', {
+    NIR: s2Bands.select('B8'),
+    RED: s2Bands.select('B4')
+}).rename('SAVI');
+
+var MSAVI = s2Bands.expression(
+  '(2*NIR + 1 - sqrt((2*NIR + 1)**2 - 8*(NIR - RED)))/2', {
+    NIR: s2Bands.select('B8'),
+    RED: s2Bands.select('B4')
+}).rename('MSAVI');
+
+var AWEI = s2Bands.expression(
+  '4*(GREEN - SWIR1) - (0.25*NIR + 2.75*SWIR2)', {
+    GREEN: s2Bands.select('B3').divide(10000),
+    SWIR1: s2Bands.select('B11').divide(10000),
+    NIR: s2Bands.select('B8').divide(10000),
+    SWIR2: s2Bands.select('B12').divide(10000)
+}).rename('AWEI');
+
+var indices = ee.Image.cat([NDVI, EVI, SAVI, MSAVI, AWEI, GNDVI, NDWI, MNDWI]);
+var featureStack = s2Bands.addBands(indices).toFloat();
+
+// ---------------- TRAIN RF ----------------
+var withRandom = Classes.randomColumn('random', 42);
+
+var training = withRandom.filter(ee.Filter.lt('random', 0.7));
+var testing  = withRandom.filter(ee.Filter.gte('random', 0.7));
+
+var trainingSample = featureStack.sampleRegions({
+  collection: training,
+  properties: ['id'],
+  scale: 10
+});
+
+var rf = ee.Classifier.smileRandomForest(300).train({
+  features: trainingSample,
+  classProperty: 'id',
+  inputProperties: featureStack.bandNames()
+});
+
+// =======================================================
+// ACCURACY ASSESSMENT (Testing Set)
+// =======================================================
+
+// Sample the testing points with the same feature stack
+var testingSample = featureStack.sampleRegions({
+  collection: testing,
+  properties: ['id'],
+  scale: 10
+});
+
+// Classify the testing samples
+var classifiedTest = testingSample.classify(rf);
+
+// Confusion matrix
+var confusionMatrix = classifiedTest.errorMatrix('id', 'classification');
+print('Confusion Matrix:', confusionMatrix);
+
+// Accuracy metrics
+print('Overall Accuracy:', confusionMatrix.accuracy());
+print('Kappa:', confusionMatrix.kappa());
+print('Producers Accuracy:', confusionMatrix.producersAccuracy());
+print('Users Accuracy:', confusionMatrix.consumersAccuracy());
+
+// =======================================================
+// 2️⃣ GENERATE LULC FOR 2025 ONLY
+// =======================================================
+
+var lulc2025 = featureStack.classify(rf);
+
+// =======================================================
+// 3️⃣ PALETTE
+// =======================================================
+
+var palette = [
+  '#808080','#C8E87A','#FFD700','#556B2F','#00FF00',
+  '#7CFC00','#2E8B57','#ADFF2F','#006400','#1E90FF','#8B4513'
+];
+
+// =======================================================
+// 4️⃣ DISPLAY 2025 PER BARANGAY
+// =======================================================
+
+Map.addLayer(lulc2025.clip(table),  {min: 1, max: 11, palette: palette}, '2025 Poblacion');
+Map.addLayer(lulc2025.clip(table2), {min: 1, max: 11, palette: palette}, '2025 Minsalirac');
+Map.addLayer(lulc2025.clip(table3), {min: 1, max: 11, palette: palette}, '2025 San Isidro');
+
+// =======================================================
+// 5️⃣ EXPORT FUNCTION (2025 ONLY)
+// =======================================================
+
+function exportLULC(image, year, barangayName, barangayGeom) {
+  Export.image.toDrive({
+    image: image.clip(barangayGeom),
+    description: barangayName + '_LULC_' + year,
+    folder: 'GEE_LULC_Exports',
+    fileNamePrefix: barangayName + '_LULC_' + year,
+    region: barangayGeom.geometry(),
+    scale: 10,
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+}
+
+// ================= EXPORT 2025  =================
+exportLULC(lulc2025, '2025', 'Poblacion', table);
+exportLULC(lulc2025, '2025', 'Minsalirac', table2);
+exportLULC(lulc2025, '2025', 'SanIsidro', table3);
