@@ -1,0 +1,8 @@
+# Web-Based GIS Harvest Monitoring System
+
+This repository contains the full source code of the developed Web-Based GIS system for harvest monitoring.
+
+## How to Run
+1. Install Python 3.10+
+2. Run: python main.py
+3. Open browser at http://localhost:5000
