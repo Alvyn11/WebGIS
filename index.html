@@ -1,0 +1,584 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Editable Farm Data Manager</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Leaflet.draw (edit/delete farms) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+
+  <!-- Tabulator -->
+  <link href="https://unpkg.com/tabulator-tables@5.5.2/dist/css/tabulator.min.css" rel="stylesheet">
+  <script src="https://unpkg.com/tabulator-tables@5.5.2/dist/js/tabulator.min.js"></script>
+
+  <style>
+    body { margin:0; font-family: Arial, sans-serif; background:#f4f6fb; }
+    .topbar { background:#2b74da; color:white; padding:18px 20px; font-size:26px; font-weight:800; text-align:center; }
+    .tabs { display:flex; gap:18px; justify-content:center; padding:10px; border-bottom:1px solid #ddd; background:white;}
+    .tab { cursor:pointer; padding:10px 16px; font-weight:700; }
+    .tab.active { color:#2b74da; border-bottom:3px solid #2b74da; }
+
+    .hint {
+      padding:10px 12px; color:#555; font-size:13px;
+      background:white; border-bottom:1px solid #eee;
+      display:flex; gap:10px; align-items:center; justify-content:space-between;
+    }
+    .right { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }
+
+    .group { display:flex; flex-direction:column; gap:6px; }
+    .label { font-weight:700; font-size:12px; }
+    .status { font-size:12px; color:#333; padding-bottom:2px; max-width:360px; }
+
+    button { padding:6px 10px; font-weight:700; cursor:pointer; border:1px solid #ccc; border-radius:6px; background:#fff; }
+    button:hover { background:#f5f5f5; }
+
+    select, input[type="file"] { font-size:12px; }
+
+    .wrap { display:flex; gap:10px; padding:12px; height: calc(100vh - 150px); box-sizing:border-box; }
+    #table { width: 55%; background:white; border-radius:10px; overflow:hidden; box-shadow:0 3px 10px rgba(0,0,0,.08);}
+    #map { width: 45%; height: 100%; border-radius:10px; overflow:hidden; box-shadow:0 3px 10px rgba(0,0,0,.08); background:#e9eef5; }
+
+    /* LULC Legend */
+    .legend {
+      background: #fff;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 18px;
+      color: #333;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.15);
+      border: 1px solid rgba(0,0,0,.08);
+      max-width: 220px;
+    }
+    .legend-title { font-weight: 800; margin-bottom: 6px; }
+    .legend-row { display:flex; align-items:center; gap:8px; }
+    .legend-swatch { width:14px; height:14px; border:1px solid rgba(0,0,0,.25); border-radius:3px; flex:0 0 auto; }
+    .legend-label { word-break: break-word; }
+  </style>
+</head>
+
+<body>
+  <div class="topbar">Editable Farm Data Manager</div>
+
+  <div class="tabs">
+    <div class="tab active" data-b="Poblacion">Poblacion</div>
+    <div class="tab" data-b="Minsalirac">Minsalirac</div>
+    <div class="tab" data-b="San Isidro">San Isidro</div>
+  </div>
+
+  <div class="hint">
+    <div>
+      Upload boundary first (per tab). Upload farms to edit/delete. Upload LULC basemap to visualize land cover + legend.
+      Click a polygon to highlight its row (by id), and click a row to highlight its polygon.
+    </div>
+
+    <div class="right">
+      <div class="group">
+        <div class="label">Basemap</div>
+        <select id="basemapSelect">
+          <option value="none">None</option>
+          <option value="osm">OpenStreetMap</option>
+          <option value="sat">Satellite</option>
+        </select>
+      </div>
+
+      <div class="group">
+        <div class="label">Boundary GeoJSON</div>
+        <input id="boundaryFile" type="file" accept=".geojson,.json" />
+        <button id="uploadBoundaryBtn">Upload Boundary</button>
+      </div>
+
+      <div class="group">
+        <div class="label">Farms GeoJSON</div>
+        <input id="farmsFile" type="file" accept=".geojson,.json" />
+        <button id="uploadFarmsBtn">Upload Farms</button>
+      </div>
+
+      <div class="group">
+        <div class="label">LULC Basemap GeoJSON</div>
+        <input id="lulcFile" type="file" accept=".geojson,.json" />
+        <button id="uploadLulcBtn">Upload LULC</button>
+      </div>
+
+      <div class="status" id="status"></div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div id="table"></div>
+    <div id="map"></div>
+  </div>
+
+<script>
+const API = "http://127.0.0.1:8000/api";
+let currentBarangay = "Poblacion";
+
+// Layers & controls
+let boundaryLayer = null;
+let farmsGeoLayer = null;
+let lulcLayer = null;
+let drawnFarms = L.featureGroup(); // for Leaflet.draw edit/delete
+let currentBounds = null;
+let lockedMinZoom = null;
+let layersControl = null;
+
+// For table ↔ polygon mapping
+let farmLayerById = {};
+let selectedFarm = null;
+
+// ---- Map ----
+const map = L.map("map", { zoomControl: true, worldCopyJump: false });
+map.setView([7.8, 125.0], 11);
+
+// Basemap layers
+const basemaps = {
+  none: null,
+  osm: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 20, attribution: "&copy; OpenStreetMap" }),
+  sat: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { maxZoom: 19, attribution: "Tiles &copy; Esri" })
+};
+let activeBasemap = null;
+
+function setBasemap(key){
+  if (activeBasemap) map.removeLayer(activeBasemap);
+  activeBasemap = basemaps[key];
+  if (activeBasemap) activeBasemap.addTo(map);
+
+  if (currentBounds){
+    map.setMaxBounds(currentBounds.pad(0.10));
+    if (lockedMinZoom !== null) map.setMinZoom(lockedMinZoom);
+  }
+}
+document.getElementById("basemapSelect").addEventListener("change", (e) => setBasemap(e.target.value));
+
+// Add drawnFarms group to map (needed for Leaflet.draw edit/delete)
+drawnFarms.addTo(map);
+
+// Leaflet.draw control (edit/delete only; no drawing new polygons)
+const drawControl = new L.Control.Draw({
+  position: "topleft",
+  draw: false,
+  edit: {
+    featureGroup: drawnFarms,
+    edit: true,
+    remove: true
+  }
+});
+map.addControl(drawControl);
+
+// ---- Legend for LULC ----
+let lulcLegend = L.control({position: "bottomright"});
+lulcLegend.onAdd = function(){
+  const div = L.DomUtil.create("div", "legend");
+  div.innerHTML = "<div class='legend-title'>LULC Legend</div><div id='legendBody'></div>";
+  return div;
+};
+
+function getLulcClass(props){
+  if (!props) return "Unknown";
+  return props.class || props.lulc || props.landuse || props.type || "Unknown";
+}
+
+function getLULCColor(className){
+  switch(String(className).toLowerCase()){
+    case "forest": return "#228B22";
+    case "water": return "#1E90FF";
+    case "built-up":
+    case "builtup":
+    case "urban": return "#A9A9A9";
+    case "agriculture":
+    case "cropland": return "#FFD700";
+    case "grassland": return "#7CFC00";
+    case "bareland":
+    case "barren": return "#D2B48C";
+    default: return "#CCCCCC";
+  }
+}
+
+function updateLegendFromLulc(geo){
+  const classes = new Map(); // className -> color
+  (geo.features || []).forEach(f => {
+    const c = getLulcClass(f.properties);
+    classes.set(String(c), getLULCColor(c));
+  });
+
+  if (classes.size === 0){
+    try { map.removeControl(lulcLegend); } catch(e){}
+    return;
+  }
+
+  try { map.removeControl(lulcLegend); } catch(e){}
+  lulcLegend.addTo(map);
+
+  const body = document.getElementById("legendBody");
+  if (!body) return;
+
+  body.innerHTML = "";
+  [...classes.entries()].sort((a,b)=>a[0].localeCompare(b[0])).forEach(([label, color]) => {
+    const row = document.createElement("div");
+    row.className = "legend-row";
+    row.innerHTML = "<span class='legend-swatch' style='background:"+color+"'></span><span class='legend-label'>"+label+"</span>";
+    body.appendChild(row);
+  });
+}
+
+// ---- Table ----
+let selectedRow = null;
+
+const table = new Tabulator("#table", {
+  layout: "fitColumns",
+  height: "100%",
+  index: "id", // IMPORTANT: allows table.getRow(id)
+  placeholder: "No farm polygons yet. Upload farms.",
+  columns: [
+    {title:"ID", field:"id", width:70},
+    {title:"Farmer/Owner", field:"farmer", editor:"input"},
+    {title:"Crop", field:"crop", editor:"input"},
+    {title:"Area (ha)", field:"area_ha", editor:"input"},
+    {title:"Date Planted", field:"date_plant", editor:"input"},
+    {title:"Date Harvested", field:"date_harv", editor:"input"},
+    {title:"Tons / Yr", field:"tons_yr", editor:"input"},
+  ]
+});
+
+function highlightRowById(fid){
+  if (fid === undefined || fid === null) return;
+  const idNum = Number(fid);
+  if (!Number.isFinite(idNum)) return;
+
+  const row = table.getRow(idNum);
+  if (!row) return;
+
+  if (selectedRow) {
+    selectedRow.getElement().style.backgroundColor = "";
+    selectedRow.getElement().style.fontWeight = "";
+  }
+
+  selectedRow = row;
+  row.getElement().style.backgroundColor = "#ffe08a";
+  row.getElement().style.fontWeight = "700";
+  row.scrollTo("center", false);
+}
+
+function setStatus(msg){ document.getElementById("status").textContent = msg; }
+
+function defaultFarmStyle(){ return { color:"#008000", weight:1, fillOpacity:0.40 }; }
+function selectedFarmStyle(){ return { color:"#ff0000", weight:3, fillOpacity:0.65 }; }
+
+// ---- API helpers ----
+async function fetchJson(url){
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+}
+
+async function fetchBoundary(){
+  return await fetchJson(`${API}/boundary?barangay=${encodeURIComponent(currentBarangay)}`);
+}
+async function fetchFarms(){
+  return await fetchJson(`${API}/farms?barangay=${encodeURIComponent(currentBarangay)}`);
+}
+async function fetchLulc(){
+  return await fetchJson(`${API}/lulc?barangay=${encodeURIComponent(currentBarangay)}`);
+}
+
+async function uploadFile(endpoint, inputId){
+  const fileInput = document.getElementById(inputId);
+  if (!fileInput.files || fileInput.files.length === 0){
+    setStatus("Choose a GeoJSON file first.");
+    return;
+  }
+
+  const form = new FormData();
+  form.append("file", fileInput.files[0]); // IMPORTANT: field name must be "file"
+
+  setStatus("Uploading...");
+  const res = await fetch(`${API}/${endpoint}?barangay=${encodeURIComponent(currentBarangay)}`, {
+    method: "POST",
+    body: form
+  });
+
+  if (!res.ok){
+    const txt = await res.text();
+    setStatus("Upload failed: " + txt);
+    return;
+  }
+
+  setStatus("Upload successful ✅");
+  await reloadAll();
+}
+
+document.getElementById("uploadBoundaryBtn").addEventListener("click", () => uploadFile("upload-boundary", "boundaryFile"));
+document.getElementById("uploadFarmsBtn").addEventListener("click", () => uploadFile("upload-farms", "farmsFile"));
+document.getElementById("uploadLulcBtn").addEventListener("click", () => uploadFile("upload-lulc", "lulcFile"));
+
+// ---- Drawing / rendering ----
+function rebuildLayersControl(){
+  if (layersControl) map.removeControl(layersControl);
+
+  const baseMaps = {
+    "None": basemaps.none,
+    "OpenStreetMap": basemaps.osm,
+    "Satellite": basemaps.sat
+  };
+
+  const overlays = {};
+  if (lulcLayer) overlays["LULC"] = lulcLayer;
+  if (boundaryLayer) overlays["Boundary"] = boundaryLayer;
+  if (farmsGeoLayer) overlays["Farms"] = farmsGeoLayer;
+
+  layersControl = L.control.layers(baseMaps, overlays, {collapsed:true}).addTo(map);
+}
+
+function drawBoundary(geo){
+  if (boundaryLayer) boundaryLayer.remove();
+
+  boundaryLayer = L.geoJSON(geo, {
+    style: { color:"#111", weight:3, fillOpacity:0.05 }
+  }).addTo(map);
+
+  const b = boundaryLayer.getBounds();
+  if (b.isValid()){
+    currentBounds = b;
+    map.fitBounds(b, {padding:[20,20]});
+    map.setMaxBounds(b.pad(0.10));
+    lockedMinZoom = map.getZoom();
+    map.setMinZoom(lockedMinZoom);
+    map.setMaxZoom(20);
+  }
+}
+
+function drawLulc(geo){
+  if (lulcLayer) lulcLayer.remove();
+
+  lulcLayer = L.geoJSON(geo, {
+    style: (feature) => {
+      const cls = getLulcClass(feature.properties);
+      return {
+        color: "#333",
+        weight: 1,
+        fillOpacity: 0.60,
+        fillColor: getLULCColor(cls)
+      };
+    },
+    onEachFeature: (feature, layer) => {
+      const props = feature.properties || {};
+      const rows = Object.entries(props).map(([k,v]) => "<div><b>"+k+"</b>: "+v+"</div>").join("");
+      layer.bindPopup(rows || "No properties");
+    }
+  }).addTo(map);
+
+  // Ensure order: basemap -> LULC -> boundary -> farms
+  lulcLayer.bringToBack();
+  if (activeBasemap) activeBasemap.bringToBack();
+
+  updateLegendFromLulc(geo);
+}
+
+function onEachFarmFeature(feature, layer){
+  // Force numeric id (GeoJSON sometimes stores it as string)
+  const fidRaw = feature?.properties?.id;
+  const fid = Number(fidRaw);
+
+  if (Number.isFinite(fid)){
+    feature.properties.id = fid;
+    farmLayerById[String(fid)] = layer;
+  }
+
+  layer.on("click", function(){
+    // highlight polygon
+    if (selectedFarm) selectedFarm.setStyle(defaultFarmStyle());
+    selectedFarm = layer;
+    layer.setStyle(selectedFarmStyle());
+    layer.bringToFront();
+
+    // highlight matching table row
+    if (Number.isFinite(fid)) highlightRowById(fid);
+  });
+}
+
+function drawFarms(geo){
+  if (farmsGeoLayer) farmsGeoLayer.remove();
+  drawnFarms.clearLayers();
+  farmLayerById = {};
+  selectedFarm = null;
+
+  // Clear row highlight
+  if (selectedRow) {
+    selectedRow.getElement().style.backgroundColor = "";
+    selectedRow.getElement().style.fontWeight = "";
+    selectedRow = null;
+  }
+
+  farmsGeoLayer = L.geoJSON(geo, {
+    style: defaultFarmStyle,
+    onEachFeature: onEachFarmFeature
+  }).addTo(map);
+
+  // Add each farm polygon to drawnFarms so it becomes editable/removable
+  farmsGeoLayer.eachLayer(l => drawnFarms.addLayer(l));
+
+  // Keep farms on top
+  farmsGeoLayer.bringToFront();
+}
+
+// ---- Leaflet.draw events ----
+map.on(L.Draw.Event.EDITED, async (e) => {
+  const layers = e.layers;
+  const tasks = [];
+  layers.eachLayer(layer => {
+    const feature = layer.toGeoJSON();
+    const fid = Number(feature?.properties?.id);
+    if (!Number.isFinite(fid)) return;
+
+    tasks.push(fetch(`${API}/farms/${encodeURIComponent(fid)}?barangay=${encodeURIComponent(currentBarangay)}`, {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(feature)
+    }).then(async r => {
+      if (!r.ok) throw new Error(await r.text());
+    }));
+  });
+
+  try{
+    setStatus("Saving edits...");
+    await Promise.all(tasks);
+    setStatus("Edits saved ✅");
+    await reloadAll();
+  }catch(err){
+    setStatus("Save failed: " + err.message);
+  }
+});
+
+map.on(L.Draw.Event.DELETED, async (e) => {
+  const layers = e.layers;
+  const tasks = [];
+  layers.eachLayer(layer => {
+    const feature = layer.toGeoJSON();
+    const fid = Number(feature?.properties?.id);
+    if (!Number.isFinite(fid)) return;
+
+    tasks.push(fetch(`${API}/farms/${encodeURIComponent(fid)}?barangay=${encodeURIComponent(currentBarangay)}`, {
+      method: "DELETE"
+    }).then(async r => {
+      if (!r.ok) throw new Error(await r.text());
+    }));
+  });
+
+  try{
+    setStatus("Deleting farms...");
+    await Promise.all(tasks);
+    setStatus("Deleted ✅");
+    await reloadAll();
+  }catch(err){
+    setStatus("Delete failed: " + err.message);
+  }
+});
+
+// ---- Table events ----
+table.on("rowClick", function(e, row){
+  const data = row.getData();
+  const fid = Number(data.id);
+  if (!Number.isFinite(fid)) return;
+
+  // highlight the row
+  highlightRowById(fid);
+
+  // highlight the polygon
+  const layer = farmLayerById[String(fid)];
+  if (!layer) return;
+
+  if (selectedFarm) selectedFarm.setStyle(defaultFarmStyle());
+  selectedFarm = layer;
+  layer.setStyle(selectedFarmStyle());
+  layer.bringToFront();
+
+  if (layer.getBounds) map.fitBounds(layer.getBounds(), { padding:[20,20] });
+});
+
+table.on("cellEdited", async (cell) => {
+  const row = cell.getRow().getData();
+  const fid = Number(row.id);
+  if (!Number.isFinite(fid)) return;
+
+  try{
+    await fetch(`${API}/farms/${encodeURIComponent(fid)}?barangay=${encodeURIComponent(currentBarangay)}`, {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(row) // properties dict; backend merges
+    }).then(async r => {
+      if (!r.ok) throw new Error(await r.text());
+    });
+    setStatus("Attributes saved ✅");
+  }catch(err){
+    setStatus("Attribute save failed: " + err.message);
+  }
+});
+
+// ---- Reload ----
+async function reloadAll(){
+  try{
+    const [boundary, farms, lulc] = await Promise.all([
+      fetchBoundary().catch(() => ({type:"FeatureCollection", features:[]})),
+      fetchFarms().catch(() => ({type:"FeatureCollection", features:[]})),
+      fetchLulc().catch(() => ({type:"FeatureCollection", features:[]})),
+    ]);
+
+    if ((lulc.features || []).length > 0) drawLulc(lulc);
+    else {
+      if (lulcLayer) lulcLayer.remove();
+      lulcLayer = null;
+      try { map.removeControl(lulcLegend); } catch(e){}
+    }
+
+    if ((boundary.features || []).length > 0) drawBoundary(boundary);
+    else {
+      if (boundaryLayer) boundaryLayer.remove();
+      boundaryLayer = null;
+      currentBounds = null;
+      lockedMinZoom = null;
+      map.setMinZoom(0);
+      map.setMaxBounds(null);
+    }
+
+    drawFarms(farms);
+    const rows = (farms.features || []).map(x => x.properties || {});
+    table.setData(rows);
+
+    rebuildLayersControl();
+  }catch(err){
+    setStatus("Load failed: " + err.message);
+  }
+}
+
+// Tab switching
+document.querySelectorAll(".tab").forEach(t => {
+  t.addEventListener("click", async () => {
+    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+    t.classList.add("active");
+    currentBarangay = t.dataset.b;
+
+    document.getElementById("boundaryFile").value = "";
+    document.getElementById("farmsFile").value = "";
+    document.getElementById("lulcFile").value = "";
+    setStatus("");
+
+    currentBounds = null;
+    lockedMinZoom = null;
+    map.setMinZoom(0);
+    map.setMaxBounds(null);
+
+    await reloadAll();
+  });
+});
+
+// Default basemap
+setBasemap("none");
+reloadAll();
+</script>
+</body>
+</html>
