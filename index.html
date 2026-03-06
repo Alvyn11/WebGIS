@@ -4,15 +4,12 @@
   <meta charset="utf-8" />
   <title>Editable Farm Data Manager</title>
 
-  <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
-  <!-- Leaflet.draw (edit/delete farms) -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
   <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 
-  <!-- Tabulator -->
   <link href="https://unpkg.com/tabulator-tables@5.5.2/dist/css/tabulator.min.css" rel="stylesheet">
   <script src="https://unpkg.com/tabulator-tables@5.5.2/dist/js/tabulator.min.js"></script>
 
@@ -32,7 +29,7 @@
 
     .group { display:flex; flex-direction:column; gap:6px; }
     .label { font-weight:700; font-size:12px; }
-    .status { font-size:12px; color:#333; padding-bottom:2px; max-width:360px; }
+    .status { font-size:12px; color:#333; padding-bottom:2px; max-width:420px; }
 
     button { padding:6px 10px; font-weight:700; cursor:pointer; border:1px solid #ccc; border-radius:6px; background:#fff; }
     button:hover { background:#f5f5f5; }
@@ -66,7 +63,9 @@
       z-index: 99999;
     }
     .modal-card{
-      width: min(440px, 92vw);
+      width: min(720px, 94vw);
+      max-height: 84vh;
+      overflow:auto;
       background: #fff;
       border-radius: 14px;
       padding: 18px;
@@ -83,6 +82,39 @@
     .btn.primary{
       background:#2b74da; color:#fff; border-color:#2b74da;
     }
+    .pending-card{
+      border:1px solid #ddd;
+      border-radius:10px;
+      padding:12px;
+      margin-bottom:12px;
+      background:#fafafa;
+    }
+    .pending-title{
+      font-weight:800;
+      margin-bottom:8px;
+    }
+    .pending-grid{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:12px;
+      margin-top:8px;
+    }
+    .pending-box{
+      border:1px solid #ddd;
+      border-radius:8px;
+      padding:8px;
+      background:#fff;
+    }
+    .small{
+      font-size:12px;
+      color:#666;
+    }
+    pre{
+      white-space:pre-wrap;
+      word-break:break-word;
+      font-size:12px;
+      margin:0;
+    }
   </style>
 </head>
 
@@ -91,10 +123,10 @@
 
   <!-- Role Modal -->
   <div id="roleModal" class="modal" style="display:none;">
-    <div class="modal-card">
+    <div class="modal-card" style="width:min(440px,92vw);">
       <h2 style="margin:0 0 6px 0;">Select role</h2>
       <p style="margin:0 0 10px 0;">
-        Viewer can only view. Contributor can edit their own farms (table only). Admin can upload/edit/delete + register contributors.
+        Viewer can only view. Contributor can edit their own farms, but changes must be approved by Admin first. Admin can upload/edit/delete + register contributors + approve pending edits.
       </p>
 
       <div style="display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;">
@@ -103,7 +135,6 @@
         <button id="adminBtn" class="btn primary">Admin</button>
       </div>
 
-      <!-- Admin auth -->
       <div id="adminAuth" style="display:none; margin-top:12px;">
         <input id="adminKeyInput" type="password" placeholder="Enter Admin key"
                style="width:100%; padding:10px; border-radius:10px; border:1px solid #ccc;">
@@ -111,7 +142,6 @@
         <div id="authMsg" style="margin-top:8px; color:#b00020;"></div>
       </div>
 
-      <!-- Contributor auth -->
       <div id="contribAuth" style="display:none; margin-top:12px;">
         <input id="contribNameInput" type="text" placeholder="Contributor name (must match Farmer/Owner)"
                style="width:100%; padding:10px; border-radius:10px; border:1px solid #ccc; margin-bottom:8px;">
@@ -120,6 +150,17 @@
         <button id="contribLoginBtn" class="btn primary" style="margin-top:10px; width:100%;">Login</button>
         <div id="contribMsg" style="margin-top:8px; color:#b00020;"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- Pending modal -->
+  <div id="pendingModal" class="modal" style="display:none;">
+    <div class="modal-card">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
+        <h2 style="margin:0;">Pending Contributor Edits</h2>
+        <button id="closePendingBtn" class="btn">Close</button>
+      </div>
+      <div id="pendingList" style="margin-top:14px;"></div>
     </div>
   </div>
 
@@ -163,10 +204,14 @@
         <button id="uploadLulcBtn">Upload LULC</button>
       </div>
 
-      <!-- Admin-only register button -->
       <div class="group" id="registerBox" style="display:none;">
         <div class="label">Contributors</div>
         <button id="registerContribBtn">Register Contributor</button>
+      </div>
+
+      <div class="group" id="pendingBox" style="display:none;">
+        <div class="label">Approvals</div>
+        <button id="pendingEditsBtn">Pending Edits</button>
       </div>
 
       <div class="status" id="status"></div>
@@ -182,17 +227,13 @@
 const API = "http://127.0.0.1:8000/api";
 let currentBarangay = "Poblacion";
 
-/* =========================
-   ROLE / KEYS
-========================= */
 const ROLE_KEY = "webgis_role";
 const ADMIN_KEY_KEY = "webgis_admin_key";
 const CONTRIB_NAME_KEY = "webgis_contrib_name";
 const CONTRIB_PASS_KEY = "webgis_contrib_key";
 
-let role = sessionStorage.getItem(ROLE_KEY);                 // viewer | admin | contributor
+let role = sessionStorage.getItem(ROLE_KEY);
 let adminKey = sessionStorage.getItem(ADMIN_KEY_KEY);
-
 let contribName = sessionStorage.getItem(CONTRIB_NAME_KEY);
 let contribKey  = sessionStorage.getItem(CONTRIB_PASS_KEY);
 
@@ -201,6 +242,8 @@ let isContributor = (role === "contributor" && !!contribName && !!contribKey);
 
 function showRoleModal(){ document.getElementById("roleModal").style.display = "flex"; }
 function hideRoleModal(){ document.getElementById("roleModal").style.display = "none"; }
+function showPendingModal(){ document.getElementById("pendingModal").style.display = "flex"; }
+function hidePendingModal(){ document.getElementById("pendingModal").style.display = "none"; }
 
 function lockNonAdminUI(){
   const ids = ["boundaryFile","uploadBoundaryBtn","farmsFile","uploadFarmsBtn","lulcFile","uploadLulcBtn"];
@@ -288,13 +331,15 @@ window.addEventListener("DOMContentLoaded", () => {
     if (!isAdmin) lockNonAdminUI();
     if (isAdmin){
       document.getElementById("registerBox").style.display = "flex";
+      document.getElementById("pendingBox").style.display = "flex";
     }
   }
 });
 
+document.getElementById("closePendingBtn").addEventListener("click", hidePendingModal);
+
 function setStatus(msg){ document.getElementById("status").textContent = msg; }
 
-// contributor can edit only rows where farmer == contribName
 function canContribEditRow(rowData){
   if (!isContributor) return false;
   const owner = String(rowData?.farmer || "").trim();
@@ -302,7 +347,6 @@ function canContribEditRow(rowData){
   return owner && me && owner === me;
 }
 
-/* Admin register contributor */
 document.getElementById("registerContribBtn").addEventListener("click", async () => {
   if (!isAdmin){ setStatus("Admin only."); return; }
 
@@ -328,11 +372,124 @@ document.getElementById("registerContribBtn").addEventListener("click", async ()
   }
 });
 
+document.getElementById("pendingEditsBtn").addEventListener("click", async () => {
+  if (!isAdmin){
+    setStatus("Admin only.");
+    return;
+  }
+  await loadPendingEdits();
+});
+
+async function loadPendingEdits(){
+  try{
+    setStatus("Loading pending edits...");
+    const res = await fetch(`${API}/pending-edits?barangay=${encodeURIComponent(currentBarangay)}&status=pending`, {
+      headers: { "X-API-Key": adminKey }
+    });
+    if (!res.ok) throw new Error(await res.text());
+
+    const data = await res.json();
+    const list = document.getElementById("pendingList");
+    list.innerHTML = "";
+
+    if (!data.items || data.items.length === 0){
+      list.innerHTML = `<div class="small">No pending edits for ${currentBarangay}.</div>`;
+      showPendingModal();
+      setStatus("No pending edits.");
+      return;
+    }
+
+    data.items.forEach(item => {
+      const card = document.createElement("div");
+      card.className = "pending-card";
+
+      card.innerHTML = `
+        <div class="pending-title">
+          Request #${item.id} — Farm ${item.farm_id} — ${item.contributor_name}
+        </div>
+        <div class="small">
+          Barangay: ${item.barangay} | Submitted: ${item.created_at || ""}
+        </div>
+        <div class="pending-grid">
+          <div class="pending-box">
+            <div style="font-weight:700; margin-bottom:6px;">Current Data</div>
+            <pre>${escapeHtml(JSON.stringify(item.old_props, null, 2))}</pre>
+          </div>
+          <div class="pending-box">
+            <div style="font-weight:700; margin-bottom:6px;">Requested Data</div>
+            <pre>${escapeHtml(JSON.stringify(item.new_props, null, 2))}</pre>
+          </div>
+        </div>
+        <div style="display:flex; gap:10px; margin-top:12px;">
+          <button class="btn primary approve-btn" data-id="${item.id}">Approve</button>
+          <button class="btn reject-btn" data-id="${item.id}">Reject</button>
+        </div>
+      `;
+
+      list.appendChild(card);
+    });
+
+    list.querySelectorAll(".approve-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.id;
+        await approvePendingEdit(id);
+      });
+    });
+
+    list.querySelectorAll(".reject-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.id;
+        await rejectPendingEdit(id);
+      });
+    });
+
+    showPendingModal();
+    setStatus("Pending edits loaded.");
+  }catch(err){
+    setStatus("Failed to load pending edits: " + err.message);
+  }
+}
+
+async function approvePendingEdit(id){
+  try{
+    const res = await fetch(`${API}/pending-edits/${encodeURIComponent(id)}/approve`, {
+      method: "POST",
+      headers: { "X-API-Key": adminKey }
+    });
+    if (!res.ok) throw new Error(await res.text());
+    setStatus("Pending edit approved ✅");
+    await loadPendingEdits();
+    await reloadAll();
+  }catch(err){
+    setStatus("Approve failed: " + err.message);
+  }
+}
+
+async function rejectPendingEdit(id){
+  try{
+    const res = await fetch(`${API}/pending-edits/${encodeURIComponent(id)}/reject`, {
+      method: "POST",
+      headers: { "X-API-Key": adminKey }
+    });
+    if (!res.ok) throw new Error(await res.text());
+    setStatus("Pending edit rejected ✅");
+    await loadPendingEdits();
+  }catch(err){
+    setStatus("Reject failed: " + err.message);
+  }
+}
+
+function escapeHtml(str){
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
 /* =========================
    MAP/TABLE CODE
 ========================= */
 
-// Layers & controls
 let boundaryLayer = null;
 let farmsGeoLayer = null;
 let lulcLayer = null;
@@ -344,11 +501,9 @@ let layersControl = null;
 let farmLayerById = {};
 let selectedFarm = null;
 
-// ---- Map ----
 const map = L.map("map", { zoomControl: true, worldCopyJump: false });
 map.setView([7.8, 125.0], 11);
 
-// Basemap layers
 const basemaps = {
   none: null,
   osm: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 20, attribution: "&copy; OpenStreetMap" }),
@@ -370,7 +525,6 @@ document.getElementById("basemapSelect").addEventListener("change", (e) => setBa
 
 drawnFarms.addTo(map);
 
-// Leaflet.draw ONLY for admin
 const drawControl = new L.Control.Draw({
   position: "topleft",
   draw: false,
@@ -380,7 +534,6 @@ if (isAdmin){
   map.addControl(drawControl);
 }
 
-// ---- Legend for LULC ----
 let lulcLegend = L.control({position: "bottomright"});
 lulcLegend.onAdd = function(){
   const div = L.DomUtil.create("div", "legend");
@@ -436,25 +589,19 @@ function updateLegendFromLulc(geo){
   });
 }
 
-/* ✅ FIX: Tabulator editing permissions */
 function cellEditable(cell){
   const field = cell.getField();
   const data = cell.getRow().getData();
 
-  // never edit ID
   if (field === "id") return false;
-
-  // admin can edit everything
   if (isAdmin) return true;
 
-  // contributor: only their rows, and cannot edit farmer
   if (isContributor){
     if (!canContribEditRow(data)) return false;
     if (field === "farmer") return false;
-    return true; // can edit crop/area/date/tons etc.
+    return true;
   }
 
-  // viewer: no edits
   return false;
 }
 
@@ -465,12 +612,12 @@ const table = new Tabulator("#table", {
   placeholder: "No farm polygons yet. Upload farms.",
   columns: [
     {title:"ID", field:"id", width:70, editable:false},
-    {title:"Farmer/Owner", field:"farmer", editor:"input", editable: (cell)=> isAdmin === true},
-    {title:"Crop", field:"crop", editor:"input", editable: cellEditable},
-    {title:"Area (ha)", field:"area_ha", editor:"input", editable: cellEditable},
-    {title:"Date Planted", field:"date_plant", editor:"input", editable: cellEditable},
-    {title:"Date Harvested", field:"date_harv", editor:"input", editable: cellEditable},
-    {title:"Tons / Yr", field:"tons_yr", editor:"input", editable: cellEditable},
+    {title:"Farmer/Owner", field:"farmer", editor:"input", editable:(cell)=> isAdmin === true},
+    {title:"Crop", field:"crop", editor:"input", editable:cellEditable},
+    {title:"Area (ha)", field:"area_ha", editor:"input", editable:cellEditable},
+    {title:"Date Planted", field:"date_plant", editor:"input", editable:cellEditable},
+    {title:"Date Harvested", field:"date_harv", editor:"input", editable:cellEditable},
+    {title:"Tons / Yr", field:"tons_yr", editor:"input", editable:cellEditable},
   ]
 });
 
@@ -497,7 +644,6 @@ function highlightRowById(fid){
 function defaultFarmStyle(){ return { color:"#008000", weight:1, fillOpacity:0.40 }; }
 function selectedFarmStyle(){ return { color:"#ff0000", weight:3, fillOpacity:0.65 }; }
 
-// ---- API helpers ----
 async function fetchJson(url){
   const res = await fetch(url);
   if (!res.ok) throw new Error(await res.text());
@@ -550,7 +696,6 @@ document.getElementById("uploadBoundaryBtn").addEventListener("click", () => upl
 document.getElementById("uploadFarmsBtn").addEventListener("click", () => uploadFile("upload-farms", "farmsFile"));
 document.getElementById("uploadLulcBtn").addEventListener("click", () => uploadFile("upload-lulc", "lulcFile"));
 
-// ---- Drawing / rendering ----
 function rebuildLayersControl(){
   if (layersControl) map.removeControl(layersControl);
 
@@ -643,7 +788,6 @@ function drawFarms(geo){
   farmsGeoLayer.bringToFront();
 }
 
-// ---- Leaflet.draw events (ADMIN ONLY) ----
 map.on(L.Draw.Event.EDITED, async (e) => {
   if (!isAdmin){
     setStatus("Map editing disabled (Admin only).");
@@ -703,7 +847,6 @@ map.on(L.Draw.Event.DELETED, async (e) => {
   }
 });
 
-// ---- Table events ----
 table.on("rowClick", function(e, row){
   const data = row.getData();
   const fid = Number(data.id);
@@ -723,7 +866,7 @@ table.on("rowClick", function(e, row){
 });
 
 table.on("cellEdited", async (cell) => {
-  const row = cell.getRow().getData();
+  const row = {...cell.getRow().getData()};
   const fid = Number(row.id);
   if (!Number.isFinite(fid)) return;
 
@@ -733,7 +876,6 @@ table.on("cellEdited", async (cell) => {
     return;
   }
 
-  // contributor never sends farmer updates
   if (isContributor){
     delete row.farmer;
   }
@@ -750,19 +892,29 @@ table.on("cellEdited", async (cell) => {
   }
 
   try{
-    await fetch(`${API}/farms/${encodeURIComponent(fid)}?barangay=${encodeURIComponent(currentBarangay)}`, {
+    const res = await fetch(`${API}/farms/${encodeURIComponent(fid)}?barangay=${encodeURIComponent(currentBarangay)}`, {
       method: "PUT",
       headers,
       body: JSON.stringify(row)
-    }).then(async r => { if (!r.ok) throw new Error(await r.text()); });
+    });
+    if (!res.ok) throw new Error(await res.text());
+
+    const data = await res.json();
+
+    if (data.mode === "pending"){
+      setStatus("Edit submitted for admin approval ⏳");
+      await reloadAll();
+      return;
+    }
 
     setStatus("Saved ✅");
+    await reloadAll();
   }catch(err){
     setStatus("Save failed: " + err.message);
+    await reloadAll();
   }
 });
 
-// ---- Reload ----
 async function reloadAll(){
   try{
     const [boundary, farms, lulc] = await Promise.all([
@@ -799,7 +951,6 @@ async function reloadAll(){
   }
 }
 
-// Tab switching
 document.querySelectorAll(".tab").forEach(t => {
   t.addEventListener("click", async () => {
     document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
@@ -820,7 +971,6 @@ document.querySelectorAll(".tab").forEach(t => {
   });
 });
 
-// Default basemap
 setBasemap("none");
 reloadAll();
 </script>
