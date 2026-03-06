@@ -43,7 +43,6 @@
     #table { width: 55%; background:white; border-radius:10px; overflow:hidden; box-shadow:0 3px 10px rgba(0,0,0,.08);}
     #map { width: 45%; height: 100%; border-radius:10px; overflow:hidden; box-shadow:0 3px 10px rgba(0,0,0,.08); background:#e9eef5; }
 
-    /* LULC Legend */
     .legend {
       background: #fff;
       padding: 10px 12px;
@@ -59,11 +58,70 @@
     .legend-row { display:flex; align-items:center; gap:8px; }
     .legend-swatch { width:14px; height:14px; border:1px solid rgba(0,0,0,.25); border-radius:3px; flex:0 0 auto; }
     .legend-label { word-break: break-word; }
+
+    .modal{
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.45);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 99999;
+    }
+    .modal-card{
+      width: min(440px, 92vw);
+      background: #fff;
+      border-radius: 14px;
+      padding: 18px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.2);
+    }
+    .btn{
+      padding: 10px 14px;
+      border: 1px solid #ccc;
+      border-radius: 10px;
+      cursor: pointer;
+      background: #fff;
+      font-weight: 800;
+    }
+    .btn.primary{
+      background:#2b74da; color:#fff; border-color:#2b74da;
+    }
   </style>
 </head>
 
 <body>
   <div class="topbar">Editable Farm Data Manager</div>
+
+  <!-- Role Modal -->
+  <div id="roleModal" class="modal" style="display:none;">
+    <div class="modal-card">
+      <h2 style="margin:0 0 6px 0;">Select role</h2>
+      <p style="margin:0 0 10px 0;">
+        Viewer can only view. Contributor can edit their own farms (table only). Admin can upload/edit/delete + register contributors.
+      </p>
+
+      <div style="display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;">
+        <button id="viewerBtn" class="btn">Viewer</button>
+        <button id="contribBtn" class="btn">Contributor</button>
+        <button id="adminBtn" class="btn primary">Admin</button>
+      </div>
+
+      <!-- Admin auth -->
+      <div id="adminAuth" style="display:none; margin-top:12px;">
+        <input id="adminKeyInput" type="password" placeholder="Enter Admin key"
+               style="width:100%; padding:10px; border-radius:10px; border:1px solid #ccc;">
+        <button id="adminLoginBtn" class="btn primary" style="margin-top:10px; width:100%;">Login</button>
+        <div id="authMsg" style="margin-top:8px; color:#b00020;"></div>
+      </div>
+
+      <!-- Contributor auth -->
+      <div id="contribAuth" style="display:none; margin-top:12px;">
+        <input id="contribNameInput" type="text" placeholder="Contributor name (must match Farmer/Owner)"
+               style="width:100%; padding:10px; border-radius:10px; border:1px solid #ccc; margin-bottom:8px;">
+        <input id="contribKeyInput" type="password" placeholder="Contributor key"
+               style="width:100%; padding:10px; border-radius:10px; border:1px solid #ccc;">
+        <button id="contribLoginBtn" class="btn primary" style="margin-top:10px; width:100%;">Login</button>
+        <div id="contribMsg" style="margin-top:8px; color:#b00020;"></div>
+      </div>
+    </div>
+  </div>
 
   <div class="tabs">
     <div class="tab active" data-b="Poblacion">Poblacion</div>
@@ -105,6 +163,12 @@
         <button id="uploadLulcBtn">Upload LULC</button>
       </div>
 
+      <!-- Admin-only register button -->
+      <div class="group" id="registerBox" style="display:none;">
+        <div class="label">Contributors</div>
+        <button id="registerContribBtn">Register Contributor</button>
+      </div>
+
       <div class="status" id="status"></div>
     </div>
   </div>
@@ -118,16 +182,165 @@
 const API = "http://127.0.0.1:8000/api";
 let currentBarangay = "Poblacion";
 
+/* =========================
+   ROLE / KEYS
+========================= */
+const ROLE_KEY = "webgis_role";
+const ADMIN_KEY_KEY = "webgis_admin_key";
+const CONTRIB_NAME_KEY = "webgis_contrib_name";
+const CONTRIB_PASS_KEY = "webgis_contrib_key";
+
+let role = sessionStorage.getItem(ROLE_KEY);                 // viewer | admin | contributor
+let adminKey = sessionStorage.getItem(ADMIN_KEY_KEY);
+
+let contribName = sessionStorage.getItem(CONTRIB_NAME_KEY);
+let contribKey  = sessionStorage.getItem(CONTRIB_PASS_KEY);
+
+let isAdmin = (role === "admin" && !!adminKey);
+let isContributor = (role === "contributor" && !!contribName && !!contribKey);
+
+function showRoleModal(){ document.getElementById("roleModal").style.display = "flex"; }
+function hideRoleModal(){ document.getElementById("roleModal").style.display = "none"; }
+
+function lockNonAdminUI(){
+  const ids = ["boundaryFile","uploadBoundaryBtn","farmsFile","uploadFarmsBtn","lulcFile","uploadLulcBtn"];
+  ids.forEach(id=>{
+    const el = document.getElementById(id);
+    if (el) el.disabled = true;
+  });
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  role = sessionStorage.getItem(ROLE_KEY);
+  adminKey = sessionStorage.getItem(ADMIN_KEY_KEY);
+  contribName = sessionStorage.getItem(CONTRIB_NAME_KEY);
+  contribKey  = sessionStorage.getItem(CONTRIB_PASS_KEY);
+
+  isAdmin = (role === "admin" && !!adminKey);
+  isContributor = (role === "contributor" && !!contribName && !!contribKey);
+
+  const adminAuth = document.getElementById("adminAuth");
+  const viewerBtn = document.getElementById("viewerBtn");
+  const adminBtn = document.getElementById("adminBtn");
+  const adminLoginBtn = document.getElementById("adminLoginBtn");
+  const adminKeyInput = document.getElementById("adminKeyInput");
+  const authMsg = document.getElementById("authMsg");
+
+  const contribBtn = document.getElementById("contribBtn");
+  const contribAuth = document.getElementById("contribAuth");
+  const contribNameInput = document.getElementById("contribNameInput");
+  const contribKeyInput = document.getElementById("contribKeyInput");
+  const contribLoginBtn = document.getElementById("contribLoginBtn");
+  const contribMsg = document.getElementById("contribMsg");
+
+  if (!role){
+    showRoleModal();
+
+    viewerBtn.onclick = () => {
+      sessionStorage.setItem(ROLE_KEY, "viewer");
+      sessionStorage.removeItem(ADMIN_KEY_KEY);
+      sessionStorage.removeItem(CONTRIB_NAME_KEY);
+      sessionStorage.removeItem(CONTRIB_PASS_KEY);
+      location.reload();
+    };
+
+    adminBtn.onclick = () => {
+      contribAuth.style.display = "none";
+      adminAuth.style.display = "block";
+      adminKeyInput.focus();
+    };
+
+    adminLoginBtn.onclick = () => {
+      const key = adminKeyInput.value.trim();
+      if (!key){
+        authMsg.textContent = "Please enter the Admin key.";
+        return;
+      }
+      sessionStorage.setItem(ROLE_KEY, "admin");
+      sessionStorage.setItem(ADMIN_KEY_KEY, key);
+      sessionStorage.removeItem(CONTRIB_NAME_KEY);
+      sessionStorage.removeItem(CONTRIB_PASS_KEY);
+      location.reload();
+    };
+
+    contribBtn.onclick = () => {
+      adminAuth.style.display = "none";
+      contribAuth.style.display = "block";
+      contribNameInput.focus();
+    };
+
+    contribLoginBtn.onclick = () => {
+      const name = contribNameInput.value.trim();
+      const key = contribKeyInput.value.trim();
+      if (!name || !key){
+        contribMsg.textContent = "Please enter name and contributor key.";
+        return;
+      }
+      sessionStorage.setItem(ROLE_KEY, "contributor");
+      sessionStorage.setItem(CONTRIB_NAME_KEY, name);
+      sessionStorage.setItem(CONTRIB_PASS_KEY, key);
+      sessionStorage.removeItem(ADMIN_KEY_KEY);
+      location.reload();
+    };
+
+  } else {
+    hideRoleModal();
+    if (!isAdmin) lockNonAdminUI();
+    if (isAdmin){
+      document.getElementById("registerBox").style.display = "flex";
+    }
+  }
+});
+
+function setStatus(msg){ document.getElementById("status").textContent = msg; }
+
+// contributor can edit only rows where farmer == contribName
+function canContribEditRow(rowData){
+  if (!isContributor) return false;
+  const owner = String(rowData?.farmer || "").trim();
+  const me = String(contribName || "").trim();
+  return owner && me && owner === me;
+}
+
+/* Admin register contributor */
+document.getElementById("registerContribBtn").addEventListener("click", async () => {
+  if (!isAdmin){ setStatus("Admin only."); return; }
+
+  const name = (prompt("Contributor name (must match Farmer/Owner):") || "").trim();
+  if (!name) return;
+
+  const passkey = (prompt("Contributor key for " + name + ":") || "").trim();
+  if (!passkey) return;
+
+  try{
+    const res = await fetch(`${API}/contributors/register`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": adminKey
+      },
+      body: JSON.stringify({name, passkey})
+    });
+    if (!res.ok) throw new Error(await res.text());
+    setStatus("Contributor registered ✅ (" + name + ")");
+  }catch(err){
+    setStatus("Register failed: " + err.message);
+  }
+});
+
+/* =========================
+   MAP/TABLE CODE
+========================= */
+
 // Layers & controls
 let boundaryLayer = null;
 let farmsGeoLayer = null;
 let lulcLayer = null;
-let drawnFarms = L.featureGroup(); // for Leaflet.draw edit/delete
+let drawnFarms = L.featureGroup();
 let currentBounds = null;
 let lockedMinZoom = null;
 let layersControl = null;
 
-// For table ↔ polygon mapping
 let farmLayerById = {};
 let selectedFarm = null;
 
@@ -155,20 +368,17 @@ function setBasemap(key){
 }
 document.getElementById("basemapSelect").addEventListener("change", (e) => setBasemap(e.target.value));
 
-// Add drawnFarms group to map (needed for Leaflet.draw edit/delete)
 drawnFarms.addTo(map);
 
-// Leaflet.draw control (edit/delete only; no drawing new polygons)
+// Leaflet.draw ONLY for admin
 const drawControl = new L.Control.Draw({
   position: "topleft",
   draw: false,
-  edit: {
-    featureGroup: drawnFarms,
-    edit: true,
-    remove: true
-  }
+  edit: { featureGroup: drawnFarms, edit: true, remove: true }
 });
-map.addControl(drawControl);
+if (isAdmin){
+  map.addControl(drawControl);
+}
 
 // ---- Legend for LULC ----
 let lulcLegend = L.control({position: "bottomright"});
@@ -200,7 +410,7 @@ function getLULCColor(className){
 }
 
 function updateLegendFromLulc(geo){
-  const classes = new Map(); // className -> color
+  const classes = new Map();
   (geo.features || []).forEach(f => {
     const c = getLulcClass(f.properties);
     classes.set(String(c), getLULCColor(c));
@@ -226,25 +436,45 @@ function updateLegendFromLulc(geo){
   });
 }
 
-// ---- Table ----
-let selectedRow = null;
+/* ✅ FIX: Tabulator editing permissions */
+function cellEditable(cell){
+  const field = cell.getField();
+  const data = cell.getRow().getData();
+
+  // never edit ID
+  if (field === "id") return false;
+
+  // admin can edit everything
+  if (isAdmin) return true;
+
+  // contributor: only their rows, and cannot edit farmer
+  if (isContributor){
+    if (!canContribEditRow(data)) return false;
+    if (field === "farmer") return false;
+    return true; // can edit crop/area/date/tons etc.
+  }
+
+  // viewer: no edits
+  return false;
+}
 
 const table = new Tabulator("#table", {
   layout: "fitColumns",
   height: "100%",
-  index: "id", // IMPORTANT: allows table.getRow(id)
+  index: "id",
   placeholder: "No farm polygons yet. Upload farms.",
   columns: [
-    {title:"ID", field:"id", width:70},
-    {title:"Farmer/Owner", field:"farmer", editor:"input"},
-    {title:"Crop", field:"crop", editor:"input"},
-    {title:"Area (ha)", field:"area_ha", editor:"input"},
-    {title:"Date Planted", field:"date_plant", editor:"input"},
-    {title:"Date Harvested", field:"date_harv", editor:"input"},
-    {title:"Tons / Yr", field:"tons_yr", editor:"input"},
+    {title:"ID", field:"id", width:70, editable:false},
+    {title:"Farmer/Owner", field:"farmer", editor:"input", editable: (cell)=> isAdmin === true},
+    {title:"Crop", field:"crop", editor:"input", editable: cellEditable},
+    {title:"Area (ha)", field:"area_ha", editor:"input", editable: cellEditable},
+    {title:"Date Planted", field:"date_plant", editor:"input", editable: cellEditable},
+    {title:"Date Harvested", field:"date_harv", editor:"input", editable: cellEditable},
+    {title:"Tons / Yr", field:"tons_yr", editor:"input", editable: cellEditable},
   ]
 });
 
+let selectedRow = null;
 function highlightRowById(fid){
   if (fid === undefined || fid === null) return;
   const idNum = Number(fid);
@@ -263,8 +493,6 @@ function highlightRowById(fid){
   row.getElement().style.fontWeight = "700";
   row.scrollTo("center", false);
 }
-
-function setStatus(msg){ document.getElementById("status").textContent = msg; }
 
 function defaultFarmStyle(){ return { color:"#008000", weight:1, fillOpacity:0.40 }; }
 function selectedFarmStyle(){ return { color:"#ff0000", weight:3, fillOpacity:0.65 }; }
@@ -287,6 +515,11 @@ async function fetchLulc(){
 }
 
 async function uploadFile(endpoint, inputId){
+  if (!isAdmin){
+    setStatus("Upload disabled (Admin only).");
+    return;
+  }
+
   const fileInput = document.getElementById(inputId);
   if (!fileInput.files || fileInput.files.length === 0){
     setStatus("Choose a GeoJSON file first.");
@@ -294,11 +527,12 @@ async function uploadFile(endpoint, inputId){
   }
 
   const form = new FormData();
-  form.append("file", fileInput.files[0]); // IMPORTANT: field name must be "file"
+  form.append("file", fileInput.files[0]);
 
   setStatus("Uploading...");
   const res = await fetch(`${API}/${endpoint}?barangay=${encodeURIComponent(currentBarangay)}`, {
     method: "POST",
+    headers: { "X-API-Key": adminKey },
     body: form
   });
 
@@ -358,12 +592,7 @@ function drawLulc(geo){
   lulcLayer = L.geoJSON(geo, {
     style: (feature) => {
       const cls = getLulcClass(feature.properties);
-      return {
-        color: "#333",
-        weight: 1,
-        fillOpacity: 0.60,
-        fillColor: getLULCColor(cls)
-      };
+      return { color:"#333", weight:1, fillOpacity:0.60, fillColor:getLULCColor(cls) };
     },
     onEachFeature: (feature, layer) => {
       const props = feature.properties || {};
@@ -372,7 +601,6 @@ function drawLulc(geo){
     }
   }).addTo(map);
 
-  // Ensure order: basemap -> LULC -> boundary -> farms
   lulcLayer.bringToBack();
   if (activeBasemap) activeBasemap.bringToBack();
 
@@ -380,7 +608,6 @@ function drawLulc(geo){
 }
 
 function onEachFarmFeature(feature, layer){
-  // Force numeric id (GeoJSON sometimes stores it as string)
   const fidRaw = feature?.properties?.id;
   const fid = Number(fidRaw);
 
@@ -390,13 +617,11 @@ function onEachFarmFeature(feature, layer){
   }
 
   layer.on("click", function(){
-    // highlight polygon
     if (selectedFarm) selectedFarm.setStyle(defaultFarmStyle());
     selectedFarm = layer;
     layer.setStyle(selectedFarmStyle());
     layer.bringToFront();
 
-    // highlight matching table row
     if (Number.isFinite(fid)) highlightRowById(fid);
   });
 }
@@ -407,27 +632,24 @@ function drawFarms(geo){
   farmLayerById = {};
   selectedFarm = null;
 
-  // Clear row highlight
   if (selectedRow) {
     selectedRow.getElement().style.backgroundColor = "";
     selectedRow.getElement().style.fontWeight = "";
     selectedRow = null;
   }
 
-  farmsGeoLayer = L.geoJSON(geo, {
-    style: defaultFarmStyle,
-    onEachFeature: onEachFarmFeature
-  }).addTo(map);
-
-  // Add each farm polygon to drawnFarms so it becomes editable/removable
+  farmsGeoLayer = L.geoJSON(geo, { style: defaultFarmStyle, onEachFeature: onEachFarmFeature }).addTo(map);
   farmsGeoLayer.eachLayer(l => drawnFarms.addLayer(l));
-
-  // Keep farms on top
   farmsGeoLayer.bringToFront();
 }
 
-// ---- Leaflet.draw events ----
+// ---- Leaflet.draw events (ADMIN ONLY) ----
 map.on(L.Draw.Event.EDITED, async (e) => {
+  if (!isAdmin){
+    setStatus("Map editing disabled (Admin only).");
+    return;
+  }
+
   const layers = e.layers;
   const tasks = [];
   layers.eachLayer(layer => {
@@ -437,11 +659,9 @@ map.on(L.Draw.Event.EDITED, async (e) => {
 
     tasks.push(fetch(`${API}/farms/${encodeURIComponent(fid)}?barangay=${encodeURIComponent(currentBarangay)}`, {
       method: "PUT",
-      headers: {"Content-Type": "application/json"},
+      headers: {"Content-Type":"application/json", "X-API-Key": adminKey},
       body: JSON.stringify(feature)
-    }).then(async r => {
-      if (!r.ok) throw new Error(await r.text());
-    }));
+    }).then(async r => { if (!r.ok) throw new Error(await r.text()); }));
   });
 
   try{
@@ -455,6 +675,11 @@ map.on(L.Draw.Event.EDITED, async (e) => {
 });
 
 map.on(L.Draw.Event.DELETED, async (e) => {
+  if (!isAdmin){
+    setStatus("Delete disabled (Admin only).");
+    return;
+  }
+
   const layers = e.layers;
   const tasks = [];
   layers.eachLayer(layer => {
@@ -463,10 +688,9 @@ map.on(L.Draw.Event.DELETED, async (e) => {
     if (!Number.isFinite(fid)) return;
 
     tasks.push(fetch(`${API}/farms/${encodeURIComponent(fid)}?barangay=${encodeURIComponent(currentBarangay)}`, {
-      method: "DELETE"
-    }).then(async r => {
-      if (!r.ok) throw new Error(await r.text());
-    }));
+      method: "DELETE",
+      headers: {"X-API-Key": adminKey}
+    }).then(async r => { if (!r.ok) throw new Error(await r.text()); }));
   });
 
   try{
@@ -485,10 +709,8 @@ table.on("rowClick", function(e, row){
   const fid = Number(data.id);
   if (!Number.isFinite(fid)) return;
 
-  // highlight the row
   highlightRowById(fid);
 
-  // highlight the polygon
   const layer = farmLayerById[String(fid)];
   if (!layer) return;
 
@@ -505,17 +727,38 @@ table.on("cellEdited", async (cell) => {
   const fid = Number(row.id);
   if (!Number.isFinite(fid)) return;
 
+  if (isContributor && !canContribEditRow(row)){
+    setStatus("Not allowed to edit this farm.");
+    await reloadAll();
+    return;
+  }
+
+  // contributor never sends farmer updates
+  if (isContributor){
+    delete row.farmer;
+  }
+
+  const headers = {"Content-Type": "application/json"};
+  if (isAdmin){
+    headers["X-API-Key"] = adminKey;
+  } else if (isContributor){
+    headers["X-Contrib-Name"] = contribName;
+    headers["X-Contrib-Key"] = contribKey;
+  } else {
+    setStatus("Editing disabled.");
+    return;
+  }
+
   try{
     await fetch(`${API}/farms/${encodeURIComponent(fid)}?barangay=${encodeURIComponent(currentBarangay)}`, {
       method: "PUT",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(row) // properties dict; backend merges
-    }).then(async r => {
-      if (!r.ok) throw new Error(await r.text());
-    });
-    setStatus("Attributes saved ✅");
+      headers,
+      body: JSON.stringify(row)
+    }).then(async r => { if (!r.ok) throw new Error(await r.text()); });
+
+    setStatus("Saved ✅");
   }catch(err){
-    setStatus("Attribute save failed: " + err.message);
+    setStatus("Save failed: " + err.message);
   }
 });
 
@@ -542,6 +785,7 @@ async function reloadAll(){
       currentBounds = null;
       lockedMinZoom = null;
       map.setMinZoom(0);
+      map.setMaxZoom(20);
       map.setMaxBounds(null);
     }
 
